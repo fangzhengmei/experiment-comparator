@@ -304,3 +304,150 @@ class TestExperimentComparator:
             assert isinstance(test[1], str)
             assert isinstance(test[2], float)
             assert isinstance(test[3], bool)
+
+
+class TestEdgeCases:
+    @pytest.fixture
+    def comparator(self):
+        return ExperimentComparator(significance_level=0.05)
+    
+    def test_csv_with_nan_values_t_test_matches_dropna(self, comparator):
+        data_with_nan = pd.DataFrame({
+            'value': [1.0, 2.0, np.nan, 4.0, 5.0, np.nan, 7.0]
+        })
+        data_normal = pd.DataFrame({
+            'value': [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
+        })
+        
+        comparator.groups['nan_group'] = GroupData(
+            name='nan_group',
+            data=data_with_nan,
+            file_path='nan.csv'
+        )
+        comparator.groups['normal_group'] = GroupData(
+            name='normal_group',
+            data=data_normal,
+            file_path='normal.csv'
+        )
+        
+        result = comparator.perform_t_test('nan_group', 'normal_group', 'value')
+        
+        nan_dropped = data_with_nan['value'].dropna()
+        expected_mean = nan_dropped.mean()
+        
+        assert result.mean1 == expected_mean
+        assert len(nan_dropped) == 5
+        assert result.is_valid == True
+    
+    def test_csv_with_nan_values_anova_matches_dropna(self, comparator):
+        data1 = pd.DataFrame({'value': [1.0, 2.0, np.nan, 4.0, 5.0]})
+        data2 = pd.DataFrame({'value': [10.0, 11.0, 12.0, np.nan, 14.0]})
+        data3 = pd.DataFrame({'value': [20.0, np.nan, 22.0, 23.0, 24.0]})
+        
+        comparator.groups['g1'] = GroupData(name='g1', data=data1, file_path='g1.csv')
+        comparator.groups['g2'] = GroupData(name='g2', data=data2, file_path='g2.csv')
+        comparator.groups['g3'] = GroupData(name='g3', data=data3, file_path='g3.csv')
+        
+        result = comparator.perform_anova('value')
+        
+        assert result.is_valid == True
+        expected_mean_g1 = data1['value'].dropna().mean()
+        expected_mean_g2 = data2['value'].dropna().mean()
+        expected_mean_g3 = data3['value'].dropna().mean()
+        
+        assert result.group_means['g1'] == expected_mean_g1
+        assert result.group_means['g2'] == expected_mean_g2
+        assert result.group_means['g3'] == expected_mean_g3
+        assert len(data1['value'].dropna()) == 4
+        assert len(data2['value'].dropna()) == 4
+        assert len(data3['value'].dropna()) == 4
+    
+    def test_zero_variance_group_t_test_same_means_not_significant(self, comparator):
+        data1 = pd.DataFrame({'value': [5.0, 5.0, 5.0, 5.0]})
+        data2 = pd.DataFrame({'value': [5.0, 5.0, 5.0, 5.0]})
+        
+        comparator.groups['g1'] = GroupData(name='g1', data=data1, file_path='g1.csv')
+        comparator.groups['g2'] = GroupData(name='g2', data=data2, file_path='g2.csv')
+        
+        result = comparator.perform_t_test('g1', 'g2', 'value')
+        
+        assert result.is_valid == False
+        assert "零方差" in result.invalid_reason
+        assert result.is_significant == False
+        assert result.mean1 == 5.0
+        assert result.mean2 == 5.0
+    
+    def test_zero_variance_group_t_test_different_means_significant(self, comparator):
+        data1 = pd.DataFrame({'value': [5.0, 5.0, 5.0, 5.0]})
+        data2 = pd.DataFrame({'value': [10.0, 10.0, 10.0, 10.0]})
+        
+        comparator.groups['g1'] = GroupData(name='g1', data=data1, file_path='g1.csv')
+        comparator.groups['g2'] = GroupData(name='g2', data=data2, file_path='g2.csv')
+        
+        result = comparator.perform_t_test('g1', 'g2', 'value')
+        
+        assert result.is_valid == False
+        assert "零方差" in result.invalid_reason
+        assert result.is_significant == True
+        assert result.mean1 == 5.0
+        assert result.mean2 == 10.0
+    
+    def test_zero_variance_group_anova_same_means_not_significant(self, comparator):
+        data1 = pd.DataFrame({'value': [5.0, 5.0, 5.0]})
+        data2 = pd.DataFrame({'value': [5.0, 5.0, 5.0]})
+        data3 = pd.DataFrame({'value': [5.0, 5.0, 5.0]})
+        
+        comparator.groups['g1'] = GroupData(name='g1', data=data1, file_path='g1.csv')
+        comparator.groups['g2'] = GroupData(name='g2', data=data2, file_path='g2.csv')
+        comparator.groups['g3'] = GroupData(name='g3', data=data3, file_path='g3.csv')
+        
+        result = comparator.perform_anova('value')
+        
+        assert result.is_valid == False
+        assert "零方差" in result.invalid_reason
+        assert result.is_significant == False
+    
+    def test_zero_variance_group_anova_different_means_significant(self, comparator):
+        data1 = pd.DataFrame({'value': [5.0, 5.0, 5.0]})
+        data2 = pd.DataFrame({'value': [10.0, 10.0, 10.0]})
+        data3 = pd.DataFrame({'value': [15.0, 15.0, 15.0]})
+        
+        comparator.groups['g1'] = GroupData(name='g1', data=data1, file_path='g1.csv')
+        comparator.groups['g2'] = GroupData(name='g2', data=data2, file_path='g2.csv')
+        comparator.groups['g3'] = GroupData(name='g3', data=data3, file_path='g3.csv')
+        
+        result = comparator.perform_anova('value')
+        
+        assert result.is_valid == False
+        assert "零方差" in result.invalid_reason
+        assert result.is_significant == True
+    
+    def test_single_record_group_t_test_returns_invalid_with_reason(self, comparator):
+        data1 = pd.DataFrame({'value': [5.0]})
+        data2 = pd.DataFrame({'value': [10.0, 11.0, 12.0]})
+        
+        comparator.groups['single'] = GroupData(name='single', data=data1, file_path='single.csv')
+        comparator.groups['normal'] = GroupData(name='normal', data=data2, file_path='normal.csv')
+        
+        result = comparator.perform_t_test('single', 'normal', 'value')
+        
+        assert result.is_valid == False
+        assert "样本量不足" in result.invalid_reason
+        assert "至少需要2条记录" in result.invalid_reason
+        assert result.is_significant == False
+        assert result.mean1 == 5.0
+    
+    def test_single_record_group_anova_returns_invalid_with_reason(self, comparator):
+        data1 = pd.DataFrame({'value': [5.0]})
+        data2 = pd.DataFrame({'value': [10.0, 11.0, 12.0]})
+        data3 = pd.DataFrame({'value': [20.0, 21.0, 22.0]})
+        
+        comparator.groups['single'] = GroupData(name='single', data=data1, file_path='single.csv')
+        comparator.groups['normal1'] = GroupData(name='normal1', data=data2, file_path='normal1.csv')
+        comparator.groups['normal2'] = GroupData(name='normal2', data=data3, file_path='normal2.csv')
+        
+        result = comparator.perform_anova('value')
+        
+        assert result.is_valid == False
+        assert "样本量不足" in result.invalid_reason
+        assert "单条记录" in result.invalid_reason

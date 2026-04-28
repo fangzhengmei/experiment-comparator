@@ -33,6 +33,8 @@ class TTestResult:
     pooled_variance: float
     is_significant: bool
     significance_level: float = 0.05
+    is_valid: bool = True
+    invalid_reason: Optional[str] = None
 
 
 @dataclass
@@ -47,6 +49,8 @@ class ANOVAResult:
     group_means: Dict[str, float]
     significance_level: float = 0.05
     post_hoc_tests: List[Tuple[str, str, float, bool]] = field(default_factory=list)
+    is_valid: bool = True
+    invalid_reason: Optional[str] = None
 
 
 @dataclass
@@ -130,6 +134,54 @@ class ExperimentComparator:
         mean1 = data1.mean()
         mean2 = data2.mean()
         
+        if len(data1) < 2 or len(data2) < 2:
+            return TTestResult(
+                group1=group1_name,
+                group2=group2_name,
+                column=column,
+                t_statistic=np.nan,
+                p_value=np.nan,
+                degrees_of_freedom=np.nan,
+                mean1=mean1,
+                mean2=mean2,
+                pooled_variance=np.nan,
+                is_significant=False,
+                significance_level=self.significance_level,
+                is_valid=False,
+                invalid_reason=f"样本量不足: {group1_name}={len(data1)}条, {group2_name}={len(data2)}条，每组至少需要2条记录"
+            )
+        
+        var1 = data1.var(ddof=1)
+        var2 = data2.var(ddof=1)
+        
+        if var1 == 0 or var2 == 0:
+            zero_var_groups = []
+            if var1 == 0:
+                zero_var_groups.append(group1_name)
+            if var2 == 0:
+                zero_var_groups.append(group2_name)
+            
+            if mean1 == mean2:
+                is_significant = False
+            else:
+                is_significant = True
+            
+            return TTestResult(
+                group1=group1_name,
+                group2=group2_name,
+                column=column,
+                t_statistic=np.nan,
+                p_value=0.0 if mean1 != mean2 else 1.0,
+                degrees_of_freedom=np.nan,
+                mean1=mean1,
+                mean2=mean2,
+                pooled_variance=np.nan,
+                is_significant=is_significant,
+                significance_level=self.significance_level,
+                is_valid=False,
+                invalid_reason=f"零方差组: {', '.join(zero_var_groups)} 组所有样本值相同，无法进行标准t检验"
+            )
+        
         if self.paired_t_test:
             min_len = min(len(data1), len(data2))
             data1 = data1.iloc[:min_len]
@@ -140,7 +192,6 @@ class ExperimentComparator:
         else:
             t_statistic, p_value = ttest_ind(data1, data2, equal_var=False)
             n1, n2 = len(data1), len(data2)
-            var1, var2 = data1.var(ddof=1), data2.var(ddof=1)
             df = (var1/n1 + var2/n2)**2 / ((var1/n1)**2/(n1-1) + (var2/n2)**2/(n2-1))
             pooled_variance = ((n1-1)*var1 + (n2-1)*var2) / (n1 + n2 - 2)
         
@@ -157,7 +208,9 @@ class ExperimentComparator:
             mean2=mean2,
             pooled_variance=pooled_variance,
             is_significant=is_significant,
-            significance_level=self.significance_level
+            significance_level=self.significance_level,
+            is_valid=True,
+            invalid_reason=None
         )
     
     def perform_all_pairwise_t_tests(self) -> Dict[str, Dict[str, Dict[str, TTestResult]]]:
@@ -188,6 +241,8 @@ class ExperimentComparator:
         group_data_list = []
         group_means = {}
         group_names = []
+        group_sizes = {}
+        group_vars = {}
         
         for group_name, group_data in self.groups.items():
             data = group_data.data[column].dropna()
@@ -195,9 +250,46 @@ class ExperimentComparator:
                 group_data_list.append(data.values)
                 group_means[group_name] = data.mean()
                 group_names.append(group_name)
+                group_sizes[group_name] = len(data)
+                if len(data) >= 2:
+                    group_vars[group_name] = data.var(ddof=1)
+                else:
+                    group_vars[group_name] = np.nan
         
         if len(group_data_list) < 3:
             return None
+        
+        invalid_reasons = []
+        single_sample_groups = [name for name, size in group_sizes.items() if size < 2]
+        zero_var_groups = [name for name, var in group_vars.items() if var == 0]
+        
+        if single_sample_groups:
+            invalid_reasons.append(f"样本量不足组: {', '.join(single_sample_groups)} 仅含单条记录")
+        
+        if zero_var_groups:
+            invalid_reasons.append(f"零方差组: {', '.join(zero_var_groups)} 组内所有样本值相同")
+        
+        if invalid_reasons:
+            unique_means = set(group_means.values())
+            if len(unique_means) == 1:
+                is_significant = False
+            else:
+                is_significant = True
+            
+            return ANOVAResult(
+                groups=group_names,
+                column=column,
+                f_statistic=np.nan,
+                p_value=0.0 if is_significant else 1.0,
+                degrees_of_freedom_between=len(group_names) - 1,
+                degrees_of_freedom_within=0,
+                is_significant=is_significant,
+                group_means=group_means,
+                significance_level=self.significance_level,
+                post_hoc_tests=[],
+                is_valid=False,
+                invalid_reason="；".join(invalid_reasons) + "，无法进行标准方差分析"
+            )
         
         f_statistic, p_value = f_oneway(*group_data_list)
         
@@ -222,7 +314,9 @@ class ExperimentComparator:
             is_significant=is_significant,
             group_means=group_means,
             significance_level=self.significance_level,
-            post_hoc_tests=post_hoc_tests
+            post_hoc_tests=post_hoc_tests,
+            is_valid=True,
+            invalid_reason=None
         )
     
     def _perform_tukey_post_hoc(self, group_names: List[str], 
